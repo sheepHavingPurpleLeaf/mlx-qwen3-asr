@@ -236,8 +236,10 @@ print(result.text)
 ```
 
 The async API is better for long audio (no HTTP timeout risk). The OpenAI endpoint blocks until done — simpler for short clips and SDK integration.
+The server also implements `/v1/models` for SDK clients that perform model discovery.
 
 See [docs/server/](docs/server/) for the full API spec, deployment guide, and architecture decision record.
+See [examples/](examples/) for copy-paste workflows covering the OpenAI-compatible server, subtitles, meetings, scanner/noisy audio, and batch folders.
 
 ## Performance on Apple Silicon
 

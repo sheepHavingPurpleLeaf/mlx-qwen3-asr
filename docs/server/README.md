@@ -36,6 +36,7 @@ returns `503` when full.
 | `/health` | GET | No | Server status, queue depth |
 | `/transcribe` | POST | Yes | Submit audio → async job (poll for result) |
 | `/jobs/{id}` | GET | Yes | Poll job status / get result |
+| `/v1/models` | GET | Yes | OpenAI-compatible model discovery |
 | `/v1/audio/transcriptions` | POST | Yes | OpenAI-compatible (synchronous) |
 
 ### Submit audio
@@ -81,6 +82,9 @@ result = client.audio.transcriptions.create(
     file=open("recording.wav", "rb"),
 )
 print(result.text)
+
+for model in client.models.list():
+    print(model.id)
 ```
 
 Supports `response_format`: `json`, `text`, `verbose_json`, `srt`, `vtt`.

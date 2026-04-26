@@ -136,6 +136,12 @@ def create_app(config: ServerConfig):
     """
     try:
         from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+        from fastapi.exception_handlers import (
+            http_exception_handler,
+            request_validation_exception_handler,
+        )
+        from fastapi.exceptions import RequestValidationError
+        from fastapi.responses import JSONResponse
     except ImportError as exc:
         raise ImportError(
             "Server dependencies not installed. "
@@ -262,6 +268,36 @@ def create_app(config: ServerConfig):
     # Store state on app for test access
     app.state.server = state
 
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(request: Request, exc: HTTPException):
+        """Return OpenAI-style errors for OpenAI-compatible routes only."""
+        if request.url.path.startswith("/v1/"):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=_openai_error_payload(
+                    detail=exc.detail,
+                    status_code=exc.status_code,
+                ),
+                headers=exc.headers,
+            )
+        return await http_exception_handler(request, exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_exception_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ):
+        """Return OpenAI-style validation errors for OpenAI-compatible routes."""
+        if request.url.path.startswith("/v1/"):
+            return JSONResponse(
+                status_code=400,
+                content=_openai_error_payload(
+                    detail=_validation_error_message(exc.errors()),
+                    status_code=400,
+                ),
+            )
+        return await request_validation_exception_handler(request, exc)
+
     # ---- Endpoints ----
 
     @app.get("/health")
@@ -387,6 +423,27 @@ def create_app(config: ServerConfig):
         return resp
 
     # ---- OpenAI-compatible endpoint ----
+
+    @app.get("/v1/models")
+    async def openai_models(request: Request) -> dict:
+        """OpenAI-compatible model discovery endpoint.
+
+        Existing OpenAI SDK clients often call ``client.models.list()`` before
+        sending transcription requests. Since this server runs one loaded ASR
+        model at a time, it returns that model as the only available model.
+        """
+        _check_auth(request)
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": config.model,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "mlx-qwen3-asr",
+                }
+            ],
+        }
 
     @app.post("/v1/audio/transcriptions")
     async def openai_transcriptions(
@@ -535,6 +592,44 @@ def _sanitize_error(exc: Exception) -> str:
             msg = type(exc).__name__ + ": transcription failed"
             break
     return msg
+
+
+def _openai_error_payload(*, detail: object, status_code: int) -> dict:
+    """Build an OpenAI-compatible error response body."""
+    message = str(detail)
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail)
+
+    if status_code == 401:
+        error_type = "authentication_error"
+    elif status_code == 403:
+        error_type = "permission_error"
+    elif status_code == 429:
+        error_type = "rate_limit_error"
+    elif status_code >= 500:
+        error_type = "server_error"
+    else:
+        error_type = "invalid_request_error"
+
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+def _validation_error_message(errors: list[dict]) -> str:
+    """Render FastAPI validation details as a concise client error message."""
+    if not errors:
+        return "Invalid request"
+    first = errors[0]
+    loc = first.get("loc") or []
+    field = str(loc[-1]) if loc else "request"
+    msg = str(first.get("msg") or "Invalid value")
+    return f"{field}: {msg}"
 
 
 def _cleanup_temp(job: Job) -> None:

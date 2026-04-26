@@ -208,6 +208,32 @@ The server passes through the library output as-is — no schema translation lay
 
 ---
 
+### `GET /v1/models`
+
+OpenAI-compatible model discovery endpoint. This helps SDK clients that call
+`client.models.list()` before sending transcription requests.
+
+**Response** `200 OK`:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-ASR-0.6B",
+      "object": "model",
+      "created": 0,
+      "owned_by": "mlx-qwen3-asr"
+    }
+  ]
+}
+```
+
+The server runs one loaded ASR model at a time, so the list contains the model
+configured at startup via `--model`.
+
+---
+
 ### `POST /v1/audio/transcriptions`
 
 OpenAI-compatible transcription endpoint. Drop-in replacement for the
@@ -228,6 +254,11 @@ compatibility.
 | `prompt` | string | no | Text to guide transcription (maps to `context` internally). |
 | `response_format` | string | no | `json` (default), `text`, `verbose_json`, `srt`, `vtt` |
 | `temperature` | float | no | Accepted for compatibility. Ignored (greedy decoding). |
+
+OpenAI's hosted transcription models differ in which output formats they
+support. This local compatibility endpoint intentionally supports the full
+practical set used by Whisper-style clients: `json`, `text`, `verbose_json`,
+`srt`, and `vtt`.
 
 **Response** (`response_format=json`, default) `200 OK`:
 
@@ -291,6 +322,20 @@ The transcribed text.
 | `413` | File too large |
 | `429` | Rate limit exceeded |
 | `500` | Transcription failed |
+| `503` | Server at capacity |
+
+All `/v1/*` errors use an OpenAI-style JSON body:
+
+```json
+{
+  "error": {
+    "message": "Invalid response_format 'xml'. Supported: json, srt, text, verbose_json, vtt",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}
+```
 
 ---
 

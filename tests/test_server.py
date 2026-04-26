@@ -19,11 +19,13 @@ from mlx_qwen3_asr.server import (
     _format_srt,
     _format_time,
     _format_vtt,
+    _openai_error_payload,
     _parse_bool,
     _RateLimiter,
     _result_to_dict,
     _sanitize_error,
     _validate_config,
+    _validation_error_message,
     create_app,
 )
 
@@ -108,6 +110,27 @@ class TestSanitizeError:
         result = _sanitize_error(exc)
         assert "/Users/" not in result
         assert "ValueError" in result
+
+
+class TestOpenAIErrorPayload:
+    def test_maps_auth_error(self):
+        payload = _openai_error_payload(detail="Missing Authorization header", status_code=401)
+        assert payload["error"]["type"] == "authentication_error"
+        assert payload["error"]["message"] == "Missing Authorization header"
+        assert payload["error"]["param"] is None
+        assert payload["error"]["code"] is None
+
+    def test_maps_rate_limit_error(self):
+        payload = _openai_error_payload(detail="Rate limit exceeded", status_code=429)
+        assert payload["error"]["type"] == "rate_limit_error"
+
+
+class TestValidationErrorMessage:
+    def test_uses_first_error_field_and_message(self):
+        message = _validation_error_message(
+            [{"loc": ("body", "file"), "msg": "Field required"}]
+        )
+        assert message == "file: Field required"
 
 
 class TestCleanupTemp:
@@ -358,6 +381,42 @@ async def test_health_no_auth_required():
         assert "queued_jobs" in data
         assert "processing_jobs" in data
         assert "max_queue_depth" in data
+
+
+@pytest.mark.asyncio
+async def test_openai_models_requires_auth():
+    """OpenAI-compatible model listing requires authentication."""
+    app = _create_test_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/v1/models")
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data["error"]["type"] == "authentication_error"
+        assert data["error"]["message"] == "Missing Authorization header"
+
+
+@pytest.mark.asyncio
+async def test_openai_models_lists_loaded_model():
+    """OpenAI-compatible model listing returns the configured local model."""
+    app = _create_test_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer testkey"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["object"] == "list"
+        assert data["data"] == [
+            {
+                "id": "Qwen/Qwen3-ASR-0.6B",
+                "object": "model",
+                "created": 0,
+                "owned_by": "mlx-qwen3-asr",
+            }
+        ]
 
 
 @pytest.mark.asyncio
@@ -1019,6 +1078,25 @@ async def test_openai_requires_auth():
             files={"file": ("test.wav", b"RIFF" * 10, "audio/wav")},
         )
         assert resp.status_code == 401
+        data = resp.json()
+        assert data["error"]["type"] == "authentication_error"
+
+
+@pytest.mark.asyncio
+async def test_openai_missing_file_uses_openai_error_shape():
+    """OpenAI compat validation errors use OpenAI-style JSON."""
+    app = _create_test_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer testkey"},
+            data={"model": "Qwen/Qwen3-ASR-0.6B"},
+        )
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error"]["type"] == "invalid_request_error"
+        assert "file:" in data["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -1126,6 +1204,9 @@ async def test_openai_invalid_format():
             data={"response_format": "xml"},
         )
         assert resp.status_code == 400
+        data = resp.json()
+        assert data["error"]["type"] == "invalid_request_error"
+        assert "Invalid response_format" in data["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -1175,7 +1256,9 @@ async def test_openai_500_on_transcription_failure():
             files={"file": ("bad.wav", b"RIFF" * 10, "audio/wav")},
         )
         assert resp.status_code == 500
-        assert "detail" in resp.json()
+        data = resp.json()
+        assert data["error"]["type"] == "server_error"
+        assert data["error"]["message"] == "Audio is corrupted"
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@
 
 - `scripts/convert.py` — convert and quantize model weights for MLX.
 - `scripts/generate_mel_filters.py` — regenerate mel filter assets.
+- `scripts/pypi_download_stats.py` — fetch PyPI download visibility reports.
 - `scripts/publish_quantized.py` — publish pre-quantized artifacts.
 - `scripts/update_readme_stats.py` — refresh README test/LOC metadata from repo state.
 

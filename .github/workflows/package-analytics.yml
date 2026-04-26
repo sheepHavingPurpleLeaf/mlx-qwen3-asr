@@ -1,0 +1,42 @@
+name: Package Analytics
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback window for daily and breakdown summaries"
+        required: true
+        default: "90"
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-downloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate PyPI download reports
+        run: |
+          mkdir -p docs/analytics
+          python scripts/pypi_download_stats.py \
+            --days "${{ github.event.inputs.days || '90' }}" \
+            --markdown-output-file docs/analytics/pypi-downloads.md \
+            --json-output-file docs/analytics/pypi-downloads.json
+
+      - name: Upload analytics artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-download-stats-${{ github.run_id }}
+          path: |
+            docs/analytics/pypi-downloads.md
+            docs/analytics/pypi-downloads.json

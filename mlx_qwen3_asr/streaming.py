@@ -10,7 +10,11 @@ import numpy as np
 
 from .audio import compute_features
 from .config import DEFAULT_MODEL_ID
-from .generate import _detect_repetition
+from .generate import (
+    AUTO_MAX_NEW_TOKENS_FLOOR,
+    detect_repetition,
+    resolve_max_new_tokens,
+)
 from .load_models import _ModelHolder
 from .model import Qwen3ASRModel
 from .runtime_utils import supports_kwarg
@@ -70,7 +74,7 @@ class StreamingState:
     chunk_size_samples: int = 32000  # 2 seconds at 16kHz
     max_context_samples: int = 480000  # 30 seconds at 16kHz
     stable_text: str = ""
-    max_new_tokens: int = 4096
+    max_new_tokens: int = AUTO_MAX_NEW_TOKENS_FLOOR
     finalization_mode: str = "accuracy"
     enable_tail_refine: bool = True
     endpointing_mode: str = "fixed"
@@ -99,7 +103,7 @@ def init_streaming(
     max_context_sec: float = 30.0,
     sample_rate: int = 16000,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     finalization_mode: str = "accuracy",
     enable_tail_refine: Optional[bool] = None,
     endpointing_mode: str = "fixed",
@@ -120,7 +124,11 @@ def init_streaming(
             f"max_context_sec must be >= chunk_size_sec, got: "
             f"{max_context_sec} < {chunk_size_sec}"
         )
-    if max_new_tokens <= 0:
+    effective_max_new_tokens = resolve_max_new_tokens(
+        max_new_tokens,
+        audio_duration_sec=chunk_size_sec,
+    )
+    if effective_max_new_tokens <= 0:
         raise ValueError(f"max_new_tokens must be > 0, got: {max_new_tokens}")
     mode = str(finalization_mode).strip().lower()
     if mode not in {"accuracy", "latency"}:
@@ -159,7 +167,7 @@ def init_streaming(
         max_context_samples=int(max_context_sec * sample_rate),
         _model_path=model,
         _dtype=dtype,
-        max_new_tokens=int(max_new_tokens),
+        max_new_tokens=int(effective_max_new_tokens),
         finalization_mode=mode,
         enable_tail_refine=tail_refine,
         endpointing_mode=ep_mode,
@@ -380,7 +388,7 @@ def _decode_tokens_incremental(
             break
 
         generated.append(token)
-        if _detect_repetition(generated):
+        if detect_repetition(generated):
             break
 
         next_ids = mx.array([[token]])

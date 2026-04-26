@@ -23,7 +23,14 @@ from .diarization import (
     validate_diarization_config,
 )
 from .forced_aligner import ForcedAligner
-from .generate import GenerationConfig, generate, generate_speculative
+from .generate import (
+    FINISH_REASON_LENGTH,
+    GenerationConfig,
+    coerce_generation_result,
+    generate_speculative_with_info,
+    generate_with_info,
+    resolve_max_new_tokens,
+)
 from .load_models import _ModelHolder
 from .model import Qwen3ASRModel
 from .tokenizer import (
@@ -35,6 +42,11 @@ from .tokenizer import (
     parse_asr_output,
 )
 
+# Internal alias: the pipeline calls these names but uses the metadata-returning
+# variants. Kept patchable so tests can monkey-patch `transcribe.generate` to
+# return a list[int] (legacy contract); `coerce_generation_result` accepts both.
+generate = generate_with_info
+generate_speculative = generate_speculative_with_info
 AudioInput = Union[str, Path, np.ndarray, mx.array, tuple[np.ndarray, int]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 CJK_LANG_ALIASES = {
@@ -65,12 +77,16 @@ class TranscriptionResult:
             [{text, start, end, chunk_index, language}, ...]
         speaker_segments: Optional list of speaker-attributed spans
             [{speaker, start, end, text}, ...]
+        finish_reason: Aggregate generation stop reason.
+        truncated: Whether any chunk stopped by exhausting max_new_tokens.
     """
     text: str
     language: str
     segments: Optional[list[dict]] = None
     chunks: Optional[list[dict]] = None
     speaker_segments: Optional[list[dict]] = None
+    finish_reason: Optional[str] = None
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,7 +103,7 @@ class TranscribeOptions:
     return_chunks: bool = False
     forced_aligner: Optional[Union[str, ForcedAligner]] = None
     dtype: mx.Dtype = mx.float16
-    max_new_tokens: int = 4096
+    max_new_tokens: Optional[int] = None
     num_draft_tokens: int = 4
     verbose: bool = False
     on_progress: Optional[ProgressCallback] = None
@@ -114,7 +130,7 @@ def _build_transcribe_options(
     return_chunks: bool = False,
     forced_aligner: Optional[Union[str, ForcedAligner]] = None,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     num_draft_tokens: int = 4,
     verbose: bool = False,
     on_progress: Optional[ProgressCallback] = None,
@@ -207,7 +223,7 @@ def transcribe(
     return_chunks: bool = False,
     forced_aligner: Optional[Union[str, ForcedAligner]] = None,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     num_draft_tokens: int = 4,
     verbose: bool = False,
     on_progress: Optional[ProgressCallback] = None,
@@ -240,7 +256,8 @@ def transcribe(
         return_chunks: Whether to return chunk-level transcript metadata.
         forced_aligner: Path/name of forced aligner model or prebuilt aligner object.
         dtype: Model dtype
-        max_new_tokens: Maximum tokens to generate per chunk
+        max_new_tokens: Maximum tokens to generate per chunk. When unset,
+            a duration-aware cap is chosen for each chunk.
         num_draft_tokens: Number of speculative draft tokens per verify step
         verbose: Print progress information
         on_progress: Optional callback receiving progress event dictionaries.
@@ -319,7 +336,7 @@ async def transcribe_async(
     return_chunks: bool = False,
     forced_aligner: Optional[Union[str, ForcedAligner]] = None,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     num_draft_tokens: int = 4,
     verbose: bool = False,
     on_progress: Optional[ProgressCallback] = None,
@@ -365,7 +382,7 @@ def transcribe_batch(
     return_chunks: bool = False,
     forced_aligner: Optional[Union[str, ForcedAligner]] = None,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     num_draft_tokens: int = 4,
     verbose: bool = False,
     on_progress: Optional[ProgressCallback] = None,
@@ -478,7 +495,7 @@ async def transcribe_batch_async(
     return_chunks: bool = False,
     forced_aligner: Optional[Union[str, ForcedAligner]] = None,
     dtype: mx.Dtype = mx.float16,
-    max_new_tokens: int = 4096,
+    max_new_tokens: Optional[int] = None,
     num_draft_tokens: int = 4,
     verbose: bool = False,
     on_progress: Optional[ProgressCallback] = None,
@@ -623,7 +640,7 @@ def _transcribe_loaded_components(
     return_timestamps: bool,
     diarization_config: Optional[DiarizationConfig],
     return_chunks: bool,
-    max_new_tokens: int,
+    max_new_tokens: Optional[int],
     num_draft_tokens: int,
     verbose: bool,
     on_progress: Optional[ProgressCallback] = None,
@@ -640,6 +657,7 @@ def _transcribe_loaded_components(
     all_texts = []
     all_segments: list[dict] = []
     all_chunk_items: list[dict] = []
+    all_finish_reasons: list[str] = []
     detected_language = forced_language or "unknown"
     processed_sec = 0.0
     needs_alignment = bool(return_timestamps or diarization_config is not None)
@@ -654,14 +672,17 @@ def _transcribe_loaded_components(
         },
     )
 
-    gen_config = GenerationConfig(
-        max_new_tokens=max_new_tokens,
-        temperature=0.0,
-        num_draft_tokens=num_draft_tokens,
-    )
-
     for chunk_idx, (chunk_audio, offset) in enumerate(chunks):
         chunk_duration_sec = float(len(chunk_audio) / SAMPLE_RATE)
+        effective_max_new_tokens = resolve_max_new_tokens(
+            max_new_tokens,
+            audio_duration_sec=chunk_duration_sec,
+        )
+        gen_config = GenerationConfig(
+            max_new_tokens=effective_max_new_tokens,
+            temperature=0.0,
+            num_draft_tokens=num_draft_tokens,
+        )
         _emit_progress(
             on_progress,
             {
@@ -670,6 +691,7 @@ def _transcribe_loaded_components(
                 "total_chunks": len(chunks),
                 "chunk_offset_sec": float(offset),
                 "chunk_duration_sec": chunk_duration_sec,
+                "max_new_tokens": effective_max_new_tokens,
                 "audio_duration_sec": total_audio_sec,
                 "processed_audio_sec": processed_sec,
                 "progress": _safe_progress(processed_sec, total_audio_sec),
@@ -705,7 +727,7 @@ def _transcribe_loaded_components(
         position_ids = mx.stack([positions, positions, positions], axis=1)
 
         if draft_model_obj is None:
-            output_tokens = generate(
+            generation_output = generate(
                 model=model_obj,
                 input_ids=input_ids,
                 audio_features=audio_features,
@@ -713,7 +735,7 @@ def _transcribe_loaded_components(
                 config=gen_config,
             )
         else:
-            output_tokens = generate_speculative(
+            generation_output = generate_speculative(
                 model=model_obj,
                 draft_model=draft_model_obj,
                 input_ids=input_ids,
@@ -722,6 +744,9 @@ def _transcribe_loaded_components(
                 position_ids=position_ids,
                 config=gen_config,
             )
+        generation = coerce_generation_result(generation_output, gen_config)
+        output_tokens = generation.tokens
+        all_finish_reasons.append(generation.finish_reason)
 
         raw_text = tokenizer.decode(output_tokens)
         lang, text = parse_asr_output(raw_text, user_language=forced_language)
@@ -739,6 +764,10 @@ def _transcribe_loaded_components(
                     "end": float(offset + chunk_duration_sec),
                     "chunk_index": int(chunk_idx),
                     "language": lang,
+                    "finish_reason": generation.finish_reason,
+                    "truncated": generation.truncated,
+                    "generated_tokens": generation.generated_tokens,
+                    "max_new_tokens": generation.max_new_tokens,
                 }
             )
 
@@ -772,6 +801,10 @@ def _transcribe_loaded_components(
                 "progress": _safe_progress(processed_sec, total_audio_sec),
                 "language": lang,
                 "segment_count": len(all_segments) if return_timestamps else 0,
+                "finish_reason": generation.finish_reason,
+                "truncated": generation.truncated,
+                "generated_tokens": generation.generated_tokens,
+                "max_new_tokens": generation.max_new_tokens,
             },
         )
 
@@ -820,6 +853,10 @@ def _transcribe_loaded_components(
             },
         )
 
+    aggregate_finish_reason = _aggregate_finish_reason(all_finish_reasons)
+    aggregate_truncated = any(
+        reason == FINISH_REASON_LENGTH for reason in all_finish_reasons
+    )
     _emit_progress(
         on_progress,
         {
@@ -829,6 +866,8 @@ def _transcribe_loaded_components(
             "processed_audio_sec": processed_sec,
             "progress": 1.0,
             "language": final_language,
+            "finish_reason": aggregate_finish_reason,
+            "truncated": aggregate_truncated,
         },
     )
     return TranscriptionResult(
@@ -837,7 +876,20 @@ def _transcribe_loaded_components(
         segments=out_segments,
         chunks=all_chunk_items if return_chunks else None,
         speaker_segments=speaker_segments,
+        finish_reason=aggregate_finish_reason,
+        truncated=aggregate_truncated,
     )
+
+
+def _aggregate_finish_reason(reasons: list[str]) -> Optional[str]:
+    if not reasons:
+        return None
+    if FINISH_REASON_LENGTH in reasons:
+        return FINISH_REASON_LENGTH
+    unique = set(reasons)
+    if len(unique) == 1:
+        return reasons[0]
+    return "mixed"
 
 
 def _safe_progress(processed_audio_sec: float, total_audio_sec: float) -> float:

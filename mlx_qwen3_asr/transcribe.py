@@ -118,6 +118,19 @@ def _join_chunk_texts(texts: list[str], language: str) -> str:
     return joiner.join(texts)
 
 
+def _clear_mlx_cache() -> None:
+    """Release cached MLX buffers across old and new MLX API spellings."""
+    clear_cache = getattr(mx, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()
+        return
+
+    metal = getattr(mx, "metal", None)
+    metal_clear_cache = getattr(metal, "clear_cache", None)
+    if callable(metal_clear_cache):
+        metal_clear_cache()
+
+
 def _build_transcribe_options(
     *,
     context: str = "",
@@ -807,6 +820,13 @@ def _transcribe_loaded_components(
                 "max_new_tokens": generation.max_new_tokens,
             },
         )
+
+        # Release large per-chunk GPU tensors so the Metal allocator can reclaim
+        # memory before the next chunk.  Without this, processing hour-long audio
+        # causes unbounded memory growth (~90 GiB observed).
+        del mel, feature_lens, audio_features, input_ids, positions, position_ids
+        del generation_output, generation, draft_audio_features
+        _clear_mlx_cache()
 
     final_language = canonicalize_language(detected_language) or detected_language
     out_segments: Optional[list[dict]] = all_segments if return_timestamps else None

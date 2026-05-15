@@ -37,9 +37,14 @@ test_cases/
 # Local Qwen example that we do not maintain.
 /example_qwen3_asr.py
 
-# Per-run eval outputs are huge and ephemeral; only the canonical baseline
-# files (named `baseline_*`) under voicecmd_local/ are tracked.
+# Pinyin index pickles derived from 2026_poi.txt (large, derived).
+/pinyin_index*.pkl
+
+# Per-run eval outputs are huge and ephemeral; only canonical anchor files
+# (baseline_* and per-experiment named anchors like planC_v2_*) under
+# voicecmd_local/ are tracked.
 scripts/results/*
 !scripts/results/voicecmd_local/
 scripts/results/voicecmd_local/*
 !scripts/results/voicecmd_local/baseline_*
+!scripts/results/voicecmd_local/planC_*

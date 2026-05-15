@@ -283,11 +283,57 @@ def main() -> None:
         default=None,
         help="Rescore an existing results JSON without running inference",
     )
+    ap.add_argument(
+        "--context-file",
+        type=Path,
+        default=None,
+        help="JSON file mapping domain name → context string (hotword bias)",
+    )
+    ap.add_argument(
+        "--two-pass-poi",
+        type=Path,
+        default=None,
+        help="Path to pinyin index pickle for two-pass POI biasing",
+    )
+    ap.add_argument(
+        "--two-pass-domains",
+        type=str,
+        default="navi",
+        help="Comma-separated list of domains to apply two-pass POI biasing (default: navi)",
+    )
+    ap.add_argument(
+        "--top-k-pois",
+        type=int,
+        default=10,
+        help="Number of POI candidates to inject into pass-2 context (default: 10)",
+    )
     args = ap.parse_args()
 
     if args.rescore is not None:
         rescore_from(args.rescore, args.dataset, args.out_dir)
         return
+
+    context_by_domain: dict[str, str] = {}
+    if args.context_file is not None:
+        context_by_domain = json.loads(args.context_file.read_text(encoding="utf-8"))
+        print(f"  per-domain context loaded for: {list(context_by_domain.keys())}")
+        for d, ctx in context_by_domain.items():
+            print(f"    {d}: {len(ctx)} chars")
+
+    poi_index = None
+    two_pass_domains: set[str] = set()
+    if args.two_pass_poi is not None:
+        from poi_lookup import build_context, load_index
+
+        print(f"\n[loading POI pinyin index from {args.two_pass_poi}]")
+        t0 = time.perf_counter()
+        poi_index = load_index(args.two_pass_poi)
+        print(
+            f"  loaded {len(poi_index):,} pinyin keys in "
+            f"{time.perf_counter() - t0:.2f}s"
+        )
+        two_pass_domains = {d.strip() for d in args.two_pass_domains.split(",") if d.strip()}
+        print(f"  two-pass enabled for domains: {sorted(two_pass_domains)}  top_k={args.top_k_pois}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -362,17 +408,35 @@ def main() -> None:
     total_xf_edits = total_xf_ref = 0
 
     for i, s in enumerate(samples):
+        ctx = context_by_domain.get(s["domain"], "")
+        pass1_text = ""
+        pass2_context = ""
+        used_pass = 1
         try:
             audio = load_audio_np(str(s["wav"]), sr=SAMPLE_RATE)
             audio_sec = len(audio) / SAMPLE_RATE
-            res = _transcribe_loaded_components(
+            res1 = _transcribe_loaded_components(
                 audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
-                draft_model_obj=None, context="", language=LANGUAGE, aligner=None,
+                draft_model_obj=None, context=ctx, language=LANGUAGE, aligner=None,
                 return_timestamps=False, diarization_config=None, return_chunks=False,
                 max_new_tokens=None, num_draft_tokens=4, verbose=False, on_progress=None,
             )
-            hyp = res.text
+            pass1_text = res1.text
+            hyp = pass1_text
             err = ""
+
+            if poi_index is not None and s["domain"] in two_pass_domains:
+                pass2_context = build_context(pass1_text, poi_index, k=args.top_k_pois)
+                if pass2_context:
+                    res2 = _transcribe_loaded_components(
+                        audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
+                        draft_model_obj=None, context=pass2_context, language=LANGUAGE,
+                        aligner=None, return_timestamps=False, diarization_config=None,
+                        return_chunks=False, max_new_tokens=None, num_draft_tokens=4,
+                        verbose=False, on_progress=None,
+                    )
+                    hyp = res2.text
+                    used_pass = 2
         except Exception as e:
             audio_sec = 0.0
             hyp = ""
@@ -407,6 +471,9 @@ def main() -> None:
                 "ref_plain": s["ref_plain"],
                 "ref_itn": s["ref_itn"],
                 "mlx_hyp": hyp,
+                "pass1_text": pass1_text,
+                "pass2_context": pass2_context,
+                "used_pass": used_pass,
                 "xunfei_hyp": s["xunfei"],
                 "ref_plain_norm": rp_n,
                 "ref_itn_norm": ri_n,

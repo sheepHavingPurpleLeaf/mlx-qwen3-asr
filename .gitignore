@@ -17,3 +17,29 @@ venv/
 *.npz
 !mlx_qwen3_asr/assets/mel_filters.npz
 uv.lock
+examples/voice_input/last_recording.wav
+
+# --- local artifacts not for upstream ---
+# Model weights and other large binaries (already covered by *.safetensors, but
+# pin the directory in case future model bundles ship as .gguf / .pt / etc.)
+models/
+
+# Internal evaluation datasets (audio + annotations). Keep locally, do not push.
+AI数据音频标注_*/
+test_cases/
+
+# Stray reference audio at the repo root.
+/*.wav
+
+# POI dictionaries and other large external data.
+/2026_poi.txt
+
+# Local Qwen example that we do not maintain.
+/example_qwen3_asr.py
+
+# Per-run eval outputs are huge and ephemeral; only the canonical baseline
+# files (named `baseline_*`) under voicecmd_local/ are tracked.
+scripts/results/*
+!scripts/results/voicecmd_local/
+scripts/results/voicecmd_local/*
+!scripts/results/voicecmd_local/baseline_*

@@ -312,6 +312,13 @@ def main() -> None:
         action="store_true",
         help="Disable Tier 1 safe pass-2 skip optimization (only Tier 2 audio reuse remains)",
     )
+    ap.add_argument(
+        "--tier3-speculative",
+        action="store_true",
+        help="Enable Tier 3: speculative pass 2 using pass-1 tokens as draft "
+             "(batched verify + autoregressive fork; bit-identical to naive pass 2 "
+             "for greedy decoding)",
+    )
     args = ap.parse_args()
 
     if args.rescore is not None:
@@ -343,7 +350,8 @@ def main() -> None:
         two_pass_domains = {d.strip() for d in args.two_pass_domains.split(",") if d.strip()}
         print(
             f"  two-pass enabled for domains: {sorted(two_pass_domains)}  "
-            f"top_k={args.top_k_pois}  tier1_skip={not args.no_tier1_skip}"
+            f"top_k={args.top_k_pois}  tier1_skip={not args.no_tier1_skip}  "
+            f"tier3_speculative={args.tier3_speculative}"
         )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -445,6 +453,7 @@ def main() -> None:
                     poi_index=poi_index,
                     top_k=args.top_k_pois,
                     enable_tier1_skip=not args.no_tier1_skip,
+                    enable_tier3_speculative=args.tier3_speculative,
                     num_draft_tokens=4,
                 )
                 pass1_text = result["pass1_text"]

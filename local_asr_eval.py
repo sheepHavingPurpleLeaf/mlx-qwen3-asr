@@ -307,6 +307,11 @@ def main() -> None:
         default=10,
         help="Number of POI candidates to inject into pass-2 context (default: 10)",
     )
+    ap.add_argument(
+        "--no-tier1-skip",
+        action="store_true",
+        help="Disable Tier 1 safe pass-2 skip optimization (only Tier 2 audio reuse remains)",
+    )
     args = ap.parse_args()
 
     if args.rescore is not None:
@@ -322,9 +327,12 @@ def main() -> None:
 
     poi_index = None
     two_pass_domains: set[str] = set()
+    transcribe_two_pass = None
     if args.two_pass_poi is not None:
-        from poi_lookup import build_context, load_index
+        from poi_lookup import load_index
+        from poi_two_pass import transcribe_two_pass as _two_pass_fn
 
+        transcribe_two_pass = _two_pass_fn
         print(f"\n[loading POI pinyin index from {args.two_pass_poi}]")
         t0 = time.perf_counter()
         poi_index = load_index(args.two_pass_poi)
@@ -333,7 +341,10 @@ def main() -> None:
             f"{time.perf_counter() - t0:.2f}s"
         )
         two_pass_domains = {d.strip() for d in args.two_pass_domains.split(",") if d.strip()}
-        print(f"  two-pass enabled for domains: {sorted(two_pass_domains)}  top_k={args.top_k_pois}")
+        print(
+            f"  two-pass enabled for domains: {sorted(two_pass_domains)}  "
+            f"top_k={args.top_k_pois}  tier1_skip={not args.no_tier1_skip}"
+        )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -412,31 +423,47 @@ def main() -> None:
         pass1_text = ""
         pass2_context = ""
         used_pass = 1
+        skipped_pass2 = False
         try:
             audio = load_audio_np(str(s["wav"]), sr=SAMPLE_RATE)
             audio_sec = len(audio) / SAMPLE_RATE
-            res1 = _transcribe_loaded_components(
-                audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
-                draft_model_obj=None, context=ctx, language=LANGUAGE, aligner=None,
-                return_timestamps=False, diarization_config=None, return_chunks=False,
-                max_new_tokens=None, num_draft_tokens=4, verbose=False, on_progress=None,
-            )
-            pass1_text = res1.text
-            hyp = pass1_text
-            err = ""
 
-            if poi_index is not None and s["domain"] in two_pass_domains:
-                pass2_context = build_context(pass1_text, poi_index, k=args.top_k_pois)
-                if pass2_context:
-                    res2 = _transcribe_loaded_components(
-                        audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
-                        draft_model_obj=None, context=pass2_context, language=LANGUAGE,
-                        aligner=None, return_timestamps=False, diarization_config=None,
-                        return_chunks=False, max_new_tokens=None, num_draft_tokens=4,
-                        verbose=False, on_progress=None,
-                    )
-                    hyp = res2.text
-                    used_pass = 2
+            if (
+                poi_index is not None
+                and s["domain"] in two_pass_domains
+                and ctx == ""
+            ):
+                # Optimized two-pass path: single audio encode (Tier 2) +
+                # safe pass-2 skip (Tier 1). Output is preserved vs naive
+                # plan-C-v2 path; only compute is reduced.
+                result = transcribe_two_pass(
+                    audio,
+                    model=model,
+                    tokenizer=tokenizer,
+                    dtype=DTYPE,
+                    language=LANGUAGE,
+                    poi_index=poi_index,
+                    top_k=args.top_k_pois,
+                    enable_tier1_skip=not args.no_tier1_skip,
+                    num_draft_tokens=4,
+                )
+                pass1_text = result["pass1_text"]
+                pass2_context = result["pass2_context"]
+                hyp = result["mlx_hyp"]
+                used_pass = result["used_pass"]
+                skipped_pass2 = result["skipped_pass2"]
+            else:
+                # Single-pass (default for non-navi domains, and when a
+                # per-domain context-file overrides pass-1 input).
+                res1 = _transcribe_loaded_components(
+                    audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
+                    draft_model_obj=None, context=ctx, language=LANGUAGE, aligner=None,
+                    return_timestamps=False, diarization_config=None, return_chunks=False,
+                    max_new_tokens=None, num_draft_tokens=4, verbose=False, on_progress=None,
+                )
+                pass1_text = res1.text
+                hyp = pass1_text
+            err = ""
         except Exception as e:
             audio_sec = 0.0
             hyp = ""
@@ -474,6 +501,7 @@ def main() -> None:
                 "pass1_text": pass1_text,
                 "pass2_context": pass2_context,
                 "used_pass": used_pass,
+                "skipped_pass2": skipped_pass2,
                 "xunfei_hyp": s["xunfei"],
                 "ref_plain_norm": rp_n,
                 "ref_itn_norm": ri_n,

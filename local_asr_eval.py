@@ -41,7 +41,7 @@ from mlx_qwen3_asr.tokenizer import _TokenizerHolder
 from mlx_qwen3_asr.transcribe import _transcribe_loaded_components
 
 REPO = Path(__file__).resolve().parent
-DATASET = REPO / "AI数据音频标注_20260511_1000"
+DATASET = REPO / "AI数据音频标注"
 MODEL_DIR = REPO / "models" / "Qwen3-ASR-0.6B"
 LANGUAGE = "Chinese"
 DTYPE = mx.float16

@@ -25,6 +25,7 @@ examples/voice_input/last_recording.wav
 models/
 
 # Internal evaluation datasets (audio + annotations). Keep locally, do not push.
+AI数据音频标注/
 AI数据音频标注_*/
 test_cases/
 

@@ -9,7 +9,7 @@ import mlx.nn as nn
 def remap_weights(weights: dict[str, mx.array]) -> dict[str, mx.array]:
     """Remap HuggingFace weight keys to MLX model keys.
 
-    Two transformations:
+    Three transformations:
     1. Strip 'thinker.' prefix from all keys
        HF: thinker.audio_tower.conv2d1.weight -> audio_tower.conv2d1.weight
        HF: thinker.model.layers.0.self_attn.q_proj.weight -> model.layers.0.self_attn.q_proj.weight
@@ -19,6 +19,11 @@ def remap_weights(weights: dict[str, mx.array]) -> dict[str, mx.array]:
        PyTorch: (out_channels, in_channels, kH, kW)
        MLX:     (out_channels, kH, kW, in_channels)
        Transform: transpose(0, 2, 3, 1)
+
+    3. Materialize tied lm_head: when the checkpoint omits lm_head (HF's
+       default with tie_word_embeddings=True), copy embed_tokens.weight into
+       lm_head.weight so the MLX model has the explicit tensor it expects.
+       Common in SFT / PEFT checkpoints that follow the upstream tying.
 
     Returns:
         Remapped weights dict ready for model.load_weights()
@@ -44,6 +49,10 @@ def remap_weights(weights: dict[str, mx.array]) -> dict[str, mx.array]:
             value = value.transpose(0, 2, 3, 1)
 
         remapped[new_key] = value
+
+    # Materialize tied lm_head if missing (HF tie_word_embeddings=True).
+    if "lm_head.weight" not in remapped and "model.embed_tokens.weight" in remapped:
+        remapped["lm_head.weight"] = remapped["model.embed_tokens.weight"]
 
     return remapped
 

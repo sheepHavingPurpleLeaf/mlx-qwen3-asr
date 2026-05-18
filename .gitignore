@@ -41,6 +41,9 @@ test_cases/
 # Pinyin index pickles derived from 2026_poi.txt (large, derived).
 /pinyin_index*.pkl
 
+# Raw HF model checkpoint tarballs (large, derived inputs only).
+/checkpoint-*.tar
+
 # Per-run eval outputs are huge and ephemeral; only canonical anchor files
 # (baseline_* and per-experiment named anchors like planC_v2_*) under
 # voicecmd_local/ are tracked.
@@ -49,3 +52,4 @@ scripts/results/*
 scripts/results/voicecmd_local/*
 !scripts/results/voicecmd_local/baseline_*
 !scripts/results/voicecmd_local/planC_*
+!scripts/results/voicecmd_local/sft_*

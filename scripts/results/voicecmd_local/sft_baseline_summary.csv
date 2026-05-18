@@ -1,0 +1,22 @@
+,数量,讯飞 wer,讯飞 acc,qwen3-asr-0.6b baseline wer,qwen3-asr-0.6b baseline acc
+Total,1797,3.58,90.15,6.38,79.74
+carControl,685,2.67,91.09,4.45,86.28
+navi,312,4.53,87.18,6.16,75.0
+media,203,4.35,89.66,6.82,78.33
+unknown,160,3.78,88.12,13.97,65.0
+generalControl,107,3.34,94.39,10.86,80.37
+appPageControl,93,0.21,98.92,3.79,90.32
+lifeService,74,9.11,86.49,9.54,74.32
+phone,38,4.29,86.84,12.88,47.37
+autoPilot,35,0.0,100.0,4.74,80.0
+mediaControl,24,1.15,95.83,6.9,91.67
+carControl;carControl,20,3.35,75.0,0.94,90.0
+carKnowledge,19,2.59,84.21,3.43,73.68
+vehicleInfo,7,4.88,71.43,12.2,57.14
+weather,6,10.0,83.33,4.0,66.67
+sceneArrangement,4,0.0,100.0,0.0,100.0
+carControl;carControl;carControl,3,6.06,66.67,3.03,66.67
+appPageControl;media,3,0.0,100.0,0.0,100.0
+carControl;appPageControl,2,0.0,100.0,0.0,100.0
+media;carControl,1,7.14,0.0,7.14,0.0
+smartHome,1,0.0,100.0,0.0,100.0

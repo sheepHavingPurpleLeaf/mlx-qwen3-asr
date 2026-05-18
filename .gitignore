@@ -41,6 +41,9 @@ test_cases/
 # Pinyin index pickles derived from 2026_poi.txt (large, derived).
 /pinyin_index*.pkl
 
+# Proprietary partner protocol documents — keep locally only.
+/长安*.xlsx
+
 # Raw HF model checkpoint tarballs (large, derived inputs only).
 /checkpoint-*.tar
 

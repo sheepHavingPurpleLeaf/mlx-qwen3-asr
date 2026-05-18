@@ -319,6 +319,22 @@ def main() -> None:
              "(batched verify + autoregressive fork; bit-identical to naive pass 2 "
              "for greedy decoding)",
     )
+    ap.add_argument(
+        "--autopilot-trigger",
+        action="store_true",
+        help="Production-realistic autoPilot biasing: run pass-1 → detect autoPilot "
+             "triggers from pass-1 text → pass-2 with autoPilot context → accept "
+             "only if pass-2 contains an autoPilot canonical. Replaces the earlier "
+             "oracle-domain shortcut (which read annotation.domain to decide "
+             "biasing — not usable at inference time).",
+    )
+    ap.add_argument(
+        "--carcontrol-trigger",
+        action="store_true",
+        help="Same trigger/accept pattern as --autopilot-trigger applied to "
+             "carControl mishears (附加↔副驾, 前车↔全车, 追踪↔居中, 零公里↔零重力, "
+             "速览↔速冷, 用多么↔运动模式).",
+    )
     args = ap.parse_args()
 
     if args.rescore is not None:
@@ -334,12 +350,9 @@ def main() -> None:
 
     poi_index = None
     two_pass_domains: set[str] = set()
-    transcribe_two_pass = None
     if args.two_pass_poi is not None:
         from poi_lookup import load_index
-        from poi_two_pass import transcribe_two_pass as _two_pass_fn
 
-        transcribe_two_pass = _two_pass_fn
         print(f"\n[loading POI pinyin index from {args.two_pass_poi}]")
         t0 = time.perf_counter()
         poi_index = load_index(args.two_pass_poi)
@@ -349,8 +362,25 @@ def main() -> None:
         )
         two_pass_domains = {d.strip() for d in args.two_pass_domains.split(",") if d.strip()}
         print(
-            f"  two-pass enabled for domains: {sorted(two_pass_domains)}  "
-            f"top_k={args.top_k_pois}  tier1_skip={not args.no_tier1_skip}  "
+            f"  POI enabled for domains: {sorted(two_pass_domains)}  "
+            f"top_k={args.top_k_pois}"
+        )
+
+    use_unified = (
+        args.autopilot_trigger
+        or args.carcontrol_trigger
+        or poi_index is not None
+    )
+    transcribe_unified = None
+    if use_unified:
+        from unified_two_pass import transcribe_unified as _unified_fn
+        transcribe_unified = _unified_fn
+        print(
+            f"[unified two-pass pipeline] "
+            f"autopilot={args.autopilot_trigger}  "
+            f"carcontrol={args.carcontrol_trigger}  "
+            f"poi={poi_index is not None}  "
+            f"tier1_skip={not args.no_tier1_skip}  "
             f"tier3_speculative={args.tier3_speculative}"
         )
 
@@ -426,6 +456,12 @@ def main() -> None:
     total_mlx_edits = total_mlx_ref = 0
     total_xf_edits = total_xf_ref = 0
 
+    retriever_stats = {
+        "autopilot_fired": 0, "autopilot_accepted": 0,
+        "carcontrol_fired": 0, "carcontrol_accepted": 0,
+        "poi_fired": 0, "poi_accepted": 0,
+        "tier1_skipped": 0,
+    }
     for i, s in enumerate(samples):
         ctx = context_by_domain.get(s["domain"], "")
         pass1_text = ""
@@ -436,22 +472,22 @@ def main() -> None:
             audio = load_audio_np(str(s["wav"]), sr=SAMPLE_RATE)
             audio_sec = len(audio) / SAMPLE_RATE
 
-            if (
-                poi_index is not None
-                and s["domain"] in two_pass_domains
-                and ctx == ""
-            ):
-                # Optimized two-pass path: single audio encode (Tier 2) +
-                # safe pass-2 skip (Tier 1). Output is preserved vs naive
-                # plan-C-v2 path; only compute is reduced.
-                result = transcribe_two_pass(
+            if transcribe_unified is not None and ctx == "":
+                # Preserve anchor behavior: POI only fires on samples whose
+                # annotated domain is in --two-pass-domains. autoPilot and
+                # carControl retrievers run on ALL samples (their trigger gates
+                # filter at the text level, no domain oracle needed).
+                poi_for_sample = poi_index if s["domain"] in two_pass_domains else None
+                result = transcribe_unified(
                     audio,
                     model=model,
                     tokenizer=tokenizer,
                     dtype=DTYPE,
                     language=LANGUAGE,
-                    poi_index=poi_index,
-                    top_k=args.top_k_pois,
+                    poi_index=poi_for_sample,
+                    poi_top_k=args.top_k_pois,
+                    enable_autopilot=args.autopilot_trigger,
+                    enable_carcontrol=args.carcontrol_trigger,
                     enable_tier1_skip=not args.no_tier1_skip,
                     enable_tier3_speculative=args.tier3_speculative,
                     num_draft_tokens=4,
@@ -459,11 +495,26 @@ def main() -> None:
                 pass1_text = result["pass1_text"]
                 pass2_context = result["pass2_context"]
                 hyp = result["mlx_hyp"]
-                used_pass = result["used_pass"]
-                skipped_pass2 = result["skipped_pass2"]
+                used_retriever = result["used_retriever"]
+                used_pass = 2 if used_retriever else 1
+                skipped_pass2 = result["tier1_skipped"]
+                if result["autopilot_fired"]:
+                    retriever_stats["autopilot_fired"] += 1
+                if result["carcontrol_fired"]:
+                    retriever_stats["carcontrol_fired"] += 1
+                if result["poi_fired"]:
+                    retriever_stats["poi_fired"] += 1
+                if used_retriever == "autopilot":
+                    retriever_stats["autopilot_accepted"] += 1
+                elif used_retriever == "carcontrol":
+                    retriever_stats["carcontrol_accepted"] += 1
+                elif used_retriever == "poi":
+                    retriever_stats["poi_accepted"] += 1
+                if skipped_pass2:
+                    retriever_stats["tier1_skipped"] += 1
             else:
-                # Single-pass (default for non-navi domains, and when a
-                # per-domain context-file overrides pass-1 input).
+                # Single-pass (no retrievers enabled, or per-domain context
+                # file overrides pass-1 input).
                 res1 = _transcribe_loaded_components(
                     audio_np=audio, model_obj=model, tokenizer=tokenizer, dtype=DTYPE,
                     draft_model_obj=None, context=ctx, language=LANGUAGE, aligner=None,
@@ -538,6 +589,19 @@ def main() -> None:
             )
 
     elapsed = time.perf_counter() - t_start
+
+    if transcribe_unified is not None:
+        n = max(len(samples), 1)
+        print("\n[retriever stats]")
+        for name in ("autopilot", "carcontrol", "poi"):
+            fired = retriever_stats[f"{name}_fired"]
+            accepted = retriever_stats[f"{name}_accepted"]
+            print(
+                f"  {name:<10s}  fired {fired}/{n} ({fired/n*100:.1f}%)  "
+                f"accepted {accepted}/{n} ({accepted/n*100:.1f}%)"
+            )
+        if retriever_stats["tier1_skipped"]:
+            print(f"  POI Tier-1 safe-skip: {retriever_stats['tier1_skipped']}/{n}")
 
     # Bucket: Total + per-domain. Each bucket tracks chars (for WER) and
     # utterance match counts (for ACC). XunFei is counted only on rows that
